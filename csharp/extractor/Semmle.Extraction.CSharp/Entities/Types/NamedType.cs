@@ -17,7 +17,7 @@ namespace Semmle.Extraction.CSharp.Entities
             typeArgumentsLazy = new Lazy<Type[]>(() => symbol.TypeArguments.Select(t => Create(cx, t)).ToArray());
         }
 
-        public static NamedType Create(Context cx, INamedTypeSymbol type) => NamedTypeFactory.Instance.CreateEntityFromSymbol(cx, type);
+        public static NamedType Create(Context cx, INamedTypeSymbol type) => NamedTypeFactory.Instance.CreateEntity(cx, type);
 
         public override bool NeedsPopulation => base.NeedsPopulation || symbol.TypeKind == TypeKind.Error;
 
@@ -109,7 +109,7 @@ namespace Semmle.Extraction.CSharp.Entities
 
         public override void WriteId(TextWriter trapFile)
         {
-            symbol.BuildTypeId(Context, trapFile, true, symbol, (cx0, tb0, sub, _) => tb0.WriteSubId(Create(cx0, sub)));
+            symbol.BuildTypeId(Context, trapFile, true, symbol);
             trapFile.Write(";type");
         }
 
@@ -149,8 +149,7 @@ namespace Semmle.Extraction.CSharp.Entities
             public NamedType Create(Context cx, INamedTypeSymbol init) => new NamedType(cx, init);
         }
 
-        // Do not create typerefs of constructed generics as they are always in the current trap file, and there is a possibility
-        // that a generic could make the typedef ambiguous which leads to performance problems in QL.
+        // Do not create typerefs of constructed generics as they are always in the current trap file.
         // Create typerefs for constructed error types in case they are fully defined elsewhere.
         // We cannot use `!this.NeedsPopulation` because this would not be stable as it would depend on
         // the assembly that was being extracted at the time.
@@ -182,7 +181,7 @@ namespace Semmle.Extraction.CSharp.Entities
 
         public override void WriteId(TextWriter trapFile)
         {
-            referencedType.symbol.BuildNestedTypeId(Context, trapFile, referencedType.symbol);
+            trapFile.WriteSubId(referencedType);
             trapFile.Write(";typeRef");
         }
 

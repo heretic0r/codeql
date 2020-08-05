@@ -100,17 +100,12 @@ namespace Semmle.Extraction.CSharp.Entities
 
             // Visit base types
             var baseTypes = new List<Type>();
-            if (symbol.BaseType != null)
+            if (symbol.GetNonObjectBaseType(Context) is INamedTypeSymbol @base)
             {
-                Type baseKey = Create(Context, symbol.BaseType);
+                Type baseKey = Create(Context, @base);
                 trapFile.extend(this, baseKey.TypeRef);
                 if (symbol.TypeKind != TypeKind.Struct)
                     baseTypes.Add(baseKey);
-            }
-
-            if (symbol.TypeKind == TypeKind.Interface)
-            {
-                trapFile.extend(this, Create(Context, Context.Compilation.ObjectType));
             }
 
             if (!(base.symbol is IArrayTypeSymbol))

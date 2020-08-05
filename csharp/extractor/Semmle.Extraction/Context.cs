@@ -41,6 +41,11 @@ namespace Semmle.Extraction
         /// </summary>
         public readonly TrapWriter TrapWriter;
 
+        /// <summary>
+        /// Holds if assembly information should be prefixed to TRAP labels.
+        /// </summary>
+        public readonly bool AddAssemblyTrapPrefix;
+
         int GetNewId() => TrapWriter.IdCounter++;
 
         /// <summary>
@@ -49,33 +54,10 @@ namespace Semmle.Extraction
         /// <param name="factory">The entity factory.</param>
         /// <param name="init">The initializer for the entity.</param>
         /// <returns>The new/existing entity.</returns>
-        public Entity CreateEntity<Type, Entity>(ICachedEntityFactory<Type, Entity> factory, Type init) where Entity : ICachedEntity where Type:struct
-        {
-            return CreateNonNullEntity(factory, init);
-        }
-
-        /// <summary>
-        /// Creates a new entity using the factory.
-        /// </summary>
-        /// <param name="factory">The entity factory.</param>
-        /// <param name="init">The initializer for the entity.</param>
-        /// <returns>The new/existing entity.</returns>
-        public Entity CreateNullableEntity<Type, Entity>(ICachedEntityFactory<Type, Entity> factory, Type init) where Entity : ICachedEntity
-        {
-            return init == null ? CreateEntity2(factory, init) : CreateNonNullEntity(factory, init, objectEntityCache);
-        }
-
-        /// <summary>
-        /// Creates a new entity using the factory.
-        /// </summary>
-        /// <param name="factory">The entity factory.</param>
-        /// <param name="init">The initializer for the entity.</param>
-        /// <returns>The new/existing entity.</returns>
-        public Entity CreateEntityFromSymbol<Type, Entity>(ICachedEntityFactory<Type, Entity> factory, Type init)
+        public Entity CreateNullableEntity<Type, Entity>(ICachedEntityFactory<Type, Entity> factory, Type init)
             where Entity : ICachedEntity
-            where Type: ISymbol
         {
-            return init == null ? CreateEntity2(factory, init) : CreateNonNullEntity(factory, init, symbolEntityCache);
+            return init is null ? CreateEntity2(factory, init) : CreateNonNullEntity(factory, init);
         }
 
         // A recursion guard against writing to the trap file whilst writing an id to the trap file.
@@ -162,14 +144,8 @@ namespace Semmle.Extraction
         public Entity CreateNonNullEntity<Type, Entity>(ICachedEntityFactory<Type, Entity> factory, Type init)
             where Entity : ICachedEntity
             where Type : notnull
-            => CreateNonNullEntity(factory, init, objectEntityCache);
-
-        private Entity CreateNonNullEntity<Type, Entity>(ICachedEntityFactory<Type, Entity> factory, Type init, IDictionary<object, ICachedEntity> dictionary)
-            where Entity : ICachedEntity
         {
-            if (init is null) throw new ArgumentException("Unexpected null value", nameof(init));
-
-            if (dictionary.TryGetValue(init, out var cached))
+            if (objectEntityCache.TryGetValue(init, out var cached))
                 return (Entity)cached;
 
             using (StackGuard)
@@ -178,7 +154,7 @@ namespace Semmle.Extraction
                 var entity = factory.Create(this, init);
                 entity.Label = label;
 
-                dictionary[init] = entity;
+                objectEntityCache[init] = entity;
 
                 DefineLabel(entity, TrapWriter.Writer, Extractor);
                 if (entity.NeedsPopulation)
@@ -236,15 +212,16 @@ namespace Semmle.Extraction
         // Adaptor to convert IEqualityComparer<ISymbol> to IEqualityComparer<object>
         class SymbolComparer : IEqualityComparer<object>
         {
-            IEqualityComparer<ISymbol> comparer = SymbolEqualityComparer.IncludeNullability;
+            readonly IEqualityComparer<ISymbol> comparer = SymbolEqualityComparer.IncludeNullability;
 
-            bool IEqualityComparer<object>.Equals(object? x, object? y) => comparer.Equals(x as ISymbol, y as ISymbol);
+            bool IEqualityComparer<object>.Equals(object? x, object? y) =>
+                x is ISymbol sx && y is ISymbol sy ? comparer.Equals(sx, sy) : Equals(x, y);
 
-            int IEqualityComparer<object>.GetHashCode(object obj) => comparer.GetHashCode((ISymbol)obj);
+            int IEqualityComparer<object>.GetHashCode(object obj) =>
+                obj is ISymbol s ? comparer.GetHashCode(s) : obj.GetHashCode();
         }
 
-        readonly IDictionary<object, ICachedEntity> objectEntityCache = new Dictionary<object, ICachedEntity>();
-        readonly IDictionary<object, ICachedEntity> symbolEntityCache = new Dictionary<object, ICachedEntity>(10000, new SymbolComparer());
+        readonly IDictionary<object, ICachedEntity> objectEntityCache = new Dictionary<object, ICachedEntity>(10000, new SymbolComparer());
         readonly Dictionary<ICachedEntity, Label> entityLabelCache = new Dictionary<ICachedEntity, Label>();
         readonly HashSet<Label> extractedGenerics = new HashSet<Label>();
 
@@ -306,12 +283,14 @@ namespace Semmle.Extraction
         /// <param name="c">The Roslyn compilation.</param>
         /// <param name="extractedEntity">Name of the source/dll file.</param>
         /// <param name="scope">Defines which symbols are included in the trap file (e.g. AssemblyScope or SourceScope)</param>
-        public Context(IExtractor e, Compilation c, TrapWriter trapWriter, IExtractionScope scope)
+        /// <param name="addAssemblyTrapPrefix">Whether to add assembly prefixes to TRAP labels.</param>
+        public Context(IExtractor e, Compilation c, TrapWriter trapWriter, IExtractionScope scope, bool addAssemblyTrapPrefix)
         {
             Extractor = e;
             Compilation = c;
             Scope = scope;
             TrapWriter = trapWriter;
+            AddAssemblyTrapPrefix = addAssemblyTrapPrefix;
         }
 
         public bool FromSource => Scope.FromSource;
@@ -440,8 +419,9 @@ namespace Semmle.Extraction
                     throw new InternalError("Unexpected TrapStackBehaviour");
             }
 
-            var a = duplicationGuard ?
-                (Action)(() => WithDuplicationGuard(new Key(entity, this.Create(entity.ReportingLocation)), () => entity.Populate(TrapWriter.Writer))) :
+            var a = duplicationGuard && this.Create(entity.ReportingLocation) is NonGeneratedSourceLocation loc ?
+
+                (Action)(() => WithDuplicationGuard(new Key(entity, loc), () => entity.Populate(TrapWriter.Writer))) :
                 (Action)(() => this.Try(null, optionalSymbol, () => entity.Populate(TrapWriter.Writer)));
 
             if (deferred)
@@ -517,7 +497,7 @@ namespace Semmle.Extraction
             {
                 ExtractionError(message, optionalSymbol.ToDisplayString(), Entities.Location.Create(this, optionalSymbol.Locations.FirstOrDefault()));
             }
-            else if(!(optionalEntity is null))
+            else if (!(optionalEntity is null))
             {
                 ExtractionError(message, optionalEntity.Label.ToString(), Entities.Location.Create(this, optionalEntity.ReportingLocation));
             }
